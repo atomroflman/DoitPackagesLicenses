@@ -30,16 +30,23 @@ namespace PackageLicenses
             if (!string.IsNullOrWhiteSpace(licenseUrl) && Uri.IsWellFormedUriString(licenseUrl, UriKind.Absolute))
             {
                 var license = await new Uri(licenseUrl).GetLicenseAsync(log);
-                if (license != null) return license;
+                if (license != null) 
+                    return license;
             }
 
             var projectUrl = info.Nuspec.GetProjectUrl();
             if (!string.IsNullOrWhiteSpace(projectUrl) && Uri.IsWellFormedUriString(projectUrl, UriKind.Absolute))
             {
                 var license = await new Uri(projectUrl).GetLicenseAsync(log);
-                if (license != null) return license;
+                if (license != null) 
+                    return license;
             }
-            return null;
+            
+            return new License()
+            {
+                Name = info.Nuspec.GetMetadataValue("license"),
+                DownloadUri = string.IsNullOrWhiteSpace(info.Nuspec.GetMetadataValue("licenseUrl")) ? null : new Uri(info.Nuspec.GetMetadataValue("licenseUrl"))
+            };
         }
     }
 }
