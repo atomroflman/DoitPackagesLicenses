@@ -15,58 +15,36 @@ using System.Threading.Tasks;
 
 namespace Doit.PackagesLicenses
 {
-    internal class Logger : ILogger
-    {
-        public void Log(LogLevel level, string data) => $"{level.ToString().ToUpper()}: {data}".Dump();
-
-        public void Log(ILogMessage message) => Task.FromResult(0);
-
-        public Task LogAsync(LogLevel level, string data) => Task.FromResult(0);
-
-        public Task LogAsync(ILogMessage message) => throw new NotImplementedException();
-
-        public void LogDebug(string data) => $"DEBUG: {data}".Dump();
-
-        public void LogError(string data) => $"ERROR: {data}".Dump();
-
-        public void LogInformation(string data) => $"INFORMATION: {data}".Dump();
-
-        public void LogInformationSummary(string data) => $"SUMMARY: {data}".Dump();
-
-        public void LogMinimal(string data) => $"MINIMAL: {data}".Dump();
-
-        public void LogVerbose(string data) => $"VERBOSE: {data}".Dump();
-
-        public void LogWarning(string data) => $"WARNING: {data}".Dump();
-    }
-
-    internal static class LogExtension
-    {
-        public static void Dump(this string value) => Console.WriteLine(value);
-    }
-
     internal class Program
     {
-        private static Regex reg = new Regex(@"\'(?<name>.*)\'", RegexOptions.Compiled);
-        private static Regex entryReg = new Regex(@"> ?(?<name>[^\s]+)\s+(?<version>[0-9a-zA-Z\.-_]+)", RegexOptions.Compiled);
         private const int ERROR_PACKAGE_PATH = 0xA0;
+        private const int ERROR_ARGUMENTS = 0xA1;
         private static IConfigurationRoot _configuration = null;
         private static string _outputPath = "";
 
         private static void Main(string[] args)
         {
+            var commandLineArgs = new Tuple<string, string, string>[]
+            {
+                new Tuple<string, string, string>("-f", "folder", null),
+                new Tuple<string, string, string>("-h", "help", ":true"),
+                new Tuple<string, string, string>("-ip", "includeproject", ":true"),
+                new Tuple<string, string, string>("-j", "json", ":true"),
+                new Tuple<string, string, string>("-o", "out", null),
+                new Tuple<string, string, string>("-p", "project", null),
+                new Tuple<string, string, string>("-r", "recursive", ":true"),
+            };
+
             var builder = new ConfigurationBuilder()
               .SetBasePath(Directory.GetCurrentDirectory())
               .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
-              .AddCommandLine(args, new Dictionary<string, string>()
+              .AddCommandLine(configureSource =>
               {
-                  {"-p", "project"},
-                  {"-r", "recursive"},
-                  {"-ip", "includeproject"},
+                  configureSource.SwitchMappings = commandLineArgs.ToDictionary(v => v.Item1, v => v.Item2);
+                  configureSource.Args = args.Select(a => a.Contains(":") ? a : $"{a}{commandLineArgs.FirstOrDefault(p => p.Item1 == a || p.Item2 == a)?.Item3}");
               });
 
             string env = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
-
             if (string.IsNullOrWhiteSpace(env))
             {
                 env = "Development";
@@ -75,11 +53,33 @@ namespace Doit.PackagesLicenses
             if (env == "Development")
             {
                 builder.AddUserSecrets<Program>();
+                Console.WriteLine("Running in DEV environment.");
             }
             _configuration = builder.Build();
 
+            if (_configuration.GetSection("help").Get<bool>())
+            {
+                using var reader = new StreamReader(typeof(Program).Assembly.GetManifestResourceStream(typeof(Program), "Mat.txt"));
+                Console.WriteLine(reader.ReadToEnd());
+                return;
+            }
+
+            if (_configuration.GetSection("folder").Get<string>() == null && _configuration.GetSection("project").Get<string>() == null)
+            {
+                Console.WriteLine("You need to specify 'folder' (-f) or 'project' (-p).");
+                Environment.ExitCode = ERROR_ARGUMENTS;
+                return;
+            }
+
+            if (_configuration.GetSection("folder").Get<string>() != null && _configuration.GetSection("project").Get<string>() != null)
+            {
+                Console.WriteLine("You can only specify 'folder' (-f) or 'project' (-p).");
+                Environment.ExitCode = ERROR_ARGUMENTS;
+                return;
+            }
+
             var projectPath = _configuration.GetSection("project").Get<string>();
-            var recursive = _configuration.GetSection("recursive").Get<bool?>() ?? true;
+            var recursive = _configuration.GetSection("recursive").Get<bool?>() ?? false;
             var includeProject = _configuration.GetSection("includeproject").Get<bool?>() ?? false;
             if (!string.IsNullOrWhiteSpace(projectPath))
             {
@@ -93,19 +93,6 @@ namespace Doit.PackagesLicenses
                 }
             }
 
-            Console.WriteLine($"Starting dotnet list {projectPath} package --include-transitive");
-            var dotnetProc = new Process();
-            dotnetProc.StartInfo = new ProcessStartInfo("dotnet", $"list {projectPath} package --include-transitive");
-            dotnetProc.StartInfo.RedirectStandardOutput = true;
-            dotnetProc.Start();
-            var foundVersions = ReadAllLines(dotnetProc.StandardOutput, dotnetProc).ToList();
-            var checkList = foundVersions
-                .GroupBy(f => f.Package)
-                .Select(g => new { k = g.Key.ToLower(), d = g.GroupBy(e => e.Version).ToDictionary(k => k.Key, v => v.ToList()) })
-                .ToDictionary(g => g.k, g => g.d);
-
-            Console.Write("Change product and company name in the applicationSettings.json");
-            Console.WriteLine("----");
             var path = _configuration["Path"];
 
             if (!Directory.Exists(path))
@@ -116,9 +103,6 @@ namespace Doit.PackagesLicenses
             }
 
             _outputPath = _configuration["OutputPath"];
-
-            var log = new Logger();
-
             // GitHub Client ID and Client Secret
             const string LicenseUtilityClientId = "LicenseUtility.ClientId";
             // Add user-secretes with command line:  dotnet user-secrets set LicenseUtility.ClientId XXXX-XX-ID...
@@ -130,70 +114,44 @@ namespace Doit.PackagesLicenses
             LicenseUtility.ClientSecret = _configuration[LicenseUtilityClientSecret];
             Console.WriteLine($"The Client secret is {_configuration[LicenseUtilityClientId]}");
 
-            var packages = PackageLicensesUtility.GetPackages(path, log);
-            var list = new List<(LocalPackageInfo, License)>();
-            var t = Task.Run(async () =>
+            var projects = _configuration.GetSection("folder").Get<string>() != null
+                ? new DirectoryInfo(_configuration.GetSection("folder").Get<string>()).GetFiles("*.csproj", new EnumerationOptions() { RecurseSubdirectories = true })
+                    .Concat(new DirectoryInfo(_configuration.GetSection("folder").Get<string>()).GetFiles("package.json", new EnumerationOptions() { RecurseSubdirectories = true }))
+                    .Select(p => p.FullName)
+                : new[] { Path.IsPathFullyQualified(_configuration.GetSection("project").Get<string>())
+                    ? _configuration.GetSection("project").Get<string>()
+                    : Path.Combine(AppDomain.CurrentDomain.BaseDirectory, _configuration.GetSection("project").Get<string>())};
+
+            var packageFolders = new[] { PackageLicensesUtility.GetPackages(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), @".nuget\packages"), new Logger()) }
+                .Concat(projects.Where(p => p.EndsWith(".csproj", StringComparison.InvariantCultureIgnoreCase)).Select(p => PackageLicensesUtility.GetPackages(Path.Combine(Path.GetDirectoryName(p), "packages"))))
+                .SelectMany(p => p)
+                .ToList();
+
+            var typeMap = new[]
             {
-                foreach (var p in packages)
-                {
-                    if (!checkList.TryGetValue(p.Identity.Id, out Dictionary<string, List<Result>> usedPackageVersions))
-                        continue;
-                    if (!usedPackageVersions.TryGetValue(p.Identity.Version.ToString(), out List<Result> packageProjects))
-                        continue;
-                    if (p.Identity.Id.StartsWith("r4."))
-                    {
-                        foreach (var project in packageProjects)
-                            project.IgnoredReason = "is R4 Lib";
-                        Console.WriteLine("Ignore R4 Libs");
-                        continue;
-                    }
+                new { nameReg = new Regex(@".*\.csproj"), type = (ILicenseReader)new CsprojLicenseReader(packageFolders) },
+                new { nameReg = new Regex(@"^(?:(?!node_modules).)+\\package.json$"), type = (ILicenseReader)new NodeJsLicenseReader() },
+            };
+            IEnumerable<LicenseResult> foundVersions = new LicenseResult[0];
 
-
-                    Console.WriteLine($"{p.Nuspec.GetId()}.{p.Nuspec.GetVersion()}");
-                    if (p.Nuspec.GetAuthors().ToLower().StartsWith("microsoft"))
-                    {
-                        foreach (var project in packageProjects)
-                            project.IgnoredReason = "is Microsoft Package";
-                        Console.WriteLine("Ignore Microsoft");
-                        continue;
-                    }
-
-                    if (p.Nuspec.GetAuthors().ToLower().StartsWith("jetbrain"))
-                    {
-                        foreach (var project in packageProjects)
-                            project.IgnoredReason = "is authored by jetbrains";
-                        Console.WriteLine("Ignore Jetbrain");
-                        continue;
-                    }
-
-                    if (p.Nuspec.GetAuthors().ToLower().StartsWith("xunit"))
-                    {
-                        foreach (var project in packageProjects)
-                            project.IgnoredReason = "is authored by XUnit";
-                        Console.WriteLine("Ignore xUnit.net [Testing Framework]");
-                        continue;
-                    }
-
-                    var license = await p.GetLicenseAsync(log);
-                    //list.Add((p, license));
-                    foreach (var project in packageProjects)
-                    {
-                        project.Licence = license?.Name;
-                        project.LicenceUrl = license?.DownloadUri?.AbsoluteUri;
-                    }
-                }
-            });
-            t.Wait();
+            foreach (var project in projects)
+            {
+                Console.WriteLine($"Reading project dependencies for: {project}");
+                var reader = typeMap.FirstOrDefault(m => m.nameReg.IsMatch(project));
+                if (reader == null)
+                    continue;
+                foundVersions = foundVersions.Concat(reader.type.ReadLicenses(project));
+            }
 
             try
             {
-                var remainingPackages = foundVersions.Where(v => !v.Project.ToLower().Contains("test") && v.IgnoredReason == null);
+                var remainingPackages = foundVersions.Where(v => !v.Project.ToLower().Contains("test") && v.IgnoredReason == null).ToList();
 
                 var printedVersions =
                     includeProject
                         ? remainingPackages
                             .GroupBy(v => new { v.Project, v.Package, v.Version })
-                            .Select(v => new Result()
+                            .Select(v => new LicenseResult()
                             {
                                 Project = v.Key.Project,
                                 Package = v.Key.Package,
@@ -204,7 +162,7 @@ namespace Doit.PackagesLicenses
                             .ToList()
                         : remainingPackages
                             .GroupBy(v => new { v.Package, v.Version })
-                            .Select(v => new Result()
+                            .Select(v => new LicenseResult()
                             {
                                 Project = string.Empty,
                                 Package = v.Key.Package,
@@ -223,43 +181,8 @@ namespace Doit.PackagesLicenses
             Console.WriteLine("Completed.");
         }
 
-        private static IEnumerable<Result> ReadAllLines(StreamReader reader, Process proc)
-        {
-            var buff = string.Empty;
-            var proj = string.Empty;
-            while ((buff = reader.ReadLine()) != null || !proc.HasExited)
-            {
-                if (buff == null)
-                {
-                    Thread.Sleep(10);
-                    continue;
-                }
-                var m = reg.Match(buff);
-                if (m.Success)
-                {
-                    proj = m.Value;
-                    continue;
-                }
-                if (!string.IsNullOrWhiteSpace(buff))
-                {
-                    var entryMatch = entryReg.Match(buff);
-                    if (entryMatch.Success)
-                        yield return new Result() { Project = proj, Package = entryMatch.Groups["name"].Value, Version = entryMatch.Groups["version"].Value };
-                }
-            }
-        }
 
-        private class Result
-        {
-            public string Project { get; set; }
-            public string Package { get; set; }
-            public string Version { get; set; }
-            public string Licence { get; set; }
-            public string LicenceUrl { get; set; }
-            public string IgnoredReason { get; set; }
 
-            public override string ToString() => $"{Project}->{Package} ({Version}) with '{Licence}' from '{LicenceUrl}'{(IgnoredReason != null ? $" Ignored because {IgnoredReason}" : "")}";
-        }
         private static string GetTitle(NuGet.Packaging.NuspecReader nuspec)
         {
             if (nuspec.GetTitle()?.Length > 0)
@@ -328,7 +251,7 @@ namespace Doit.PackagesLicenses
             return null;
         }
 
-        private static void CreateWorkbook(List<Result> list, bool includeProject)
+        private static void CreateWorkbook(List<LicenseResult> list, bool includeProject)
         {
             var book = new XLWorkbook();
             var sheet = book.Worksheets.Add("Packages");
@@ -336,10 +259,10 @@ namespace Doit.PackagesLicenses
             // header
             var headers = new[] {
                 includeProject ? "Project" : null,
-                "Title", 
-                "Licence", 
-                "LicenceUrl", 
-                "ProjectUrl" 
+                "Title",
+                "Licence",
+                "LicenceUrl",
+                "ProjectUrl"
             }.Where(h => h != null);
 
             var cell = 1;

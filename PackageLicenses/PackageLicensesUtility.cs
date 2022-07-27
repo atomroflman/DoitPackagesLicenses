@@ -2,6 +2,7 @@
 using NuGet.Protocol;
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Threading.Tasks;
 
 namespace PackageLicenses
@@ -10,16 +11,23 @@ namespace PackageLicenses
     {
         public static IEnumerable<LocalPackageInfo> GetPackages(string packagesPath, ILogger log = null)
         {
-            var logger = log ?? NullLogger.Instance;
-            var type = LocalFolderUtility.GetLocalFeedType(packagesPath, logger);
-            switch (type)
+            try
             {
-                case FeedType.FileSystemV2:
-                    return LocalFolderUtility.GetPackagesV2(packagesPath, logger);
-                case FeedType.FileSystemV3:
-                    return LocalFolderUtility.GetPackagesV3(packagesPath, logger);
-                default:
-                    break;
+                var logger = log ?? NullLogger.Instance;
+                var type = LocalFolderUtility.GetLocalFeedType(packagesPath, logger);
+                switch (type)
+                {
+                    case FeedType.FileSystemV2:
+                        return LocalFolderUtility.GetPackagesV2(packagesPath, logger);
+                    case FeedType.FileSystemV3:
+                        return LocalFolderUtility.GetPackagesV3(packagesPath, logger);
+                    default:
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex.Message);
             }
             return new List<LocalPackageInfo>();
         }

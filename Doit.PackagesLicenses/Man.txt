@@ -1,0 +1,9 @@
+﻿Parameters:
+
+ -f => folder           | Defines the folder, that should be scanned for projects. (.csproj / package.json).
+ -h => help             | Displays this help.
+ -i => includeproject   | Defines if the referencing project should be printed.
+ -j => json             | Defines if the result shoould be generated as json.
+ -o => out              | Defines the output path.
+ -p => project          | Defines the project, that should be scanned.
+ -r => recursive        | Defines if the license check should be done recursive.
